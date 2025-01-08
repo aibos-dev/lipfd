@@ -254,7 +254,7 @@ from options.train_options import TrainOptions
 from tqdm import tqdm
 import warnings
 import numpy as np
-from deap import base, creator, tools, algorithms
+import datetime
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -264,61 +264,13 @@ def synchronize_model(model, local_rank):
         dist.broadcast(param.data, src=0)
     return model
 
-def evaluate_hyperparameters(individual, local_rank):
-    """Modified to ensure model parameters are synchronized across ranks"""
-    lr, batch_size = individual
-    
-    # Create a new TrainOptions instance with updated hyperparameters
-    opt = TrainOptions().parse(print_options=False)
-    opt.lr = lr
-    opt.batch_size = int(batch_size)
-
-    try:
-        # Ensure each process uses its assigned GPU
-        torch.cuda.set_device(local_rank)
-        
-        # Initialize the model and synchronize parameters
-        model = DistributedTrainer(opt, local_rank)
-        model = synchronize_model(model.model, local_rank)
-        
-        # Wait for all processes to finish model initialization
-        dist.barrier()
-        
-        data_loader, _ = create_distributed_dataloader(opt)
-
-        # Train for a single epoch to evaluate hyperparameters
-        total_loss = 0
-        num_batches = 0
-        
-        model.train()
-        for img, crops, label in data_loader:
-            model.set_input((img, crops, label))
-            model.forward()
-            opt_info = model.optimize_parameters()
-
-            if opt_info is not None:
-                total_loss += opt_info['loss']
-                num_batches += 1
-
-        # Gather losses from all processes
-        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
-        gathered_losses = [torch.tensor(avg_loss).cuda(local_rank)]
-        dist.all_gather(gathered_losses, torch.tensor(avg_loss).cuda(local_rank))
-        
-        # Use the mean loss across all processes
-        mean_loss = torch.mean(torch.stack(gathered_losses)).item()
-        return mean_loss,
-
-    except Exception as e:
-        print(f"Error during evaluation on rank {local_rank}: {e}")
-        return float('inf'),
-
 def get_val_opt():
+    """Get validation options"""
     val_opt = TrainOptions().parse(print_options=False)
     val_opt.isTrain = False
     val_opt.data_label = "val"
-    val_opt.real_list_path = "/workspace/datasets/AVlips_dataset/preprocessed_exp/val/0_real"
-    val_opt.fake_list_path = "/workspace/datasets/AVlips_dataset/preprocessed_exp/val/1_fake"
+    val_opt.real_list_path = "/workspace/datasets/AVlips_dataset/preprocessed_20241130/val/0_real"
+    val_opt.fake_list_path = "/workspace/datasets/AVlips_dataset/preprocessed_20241130/val/1_fake"
     return val_opt
 
 def main():
@@ -326,101 +278,55 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 4))
     
-    # Initialize the distributed process group before anything else
-    dist.init_process_group("nccl")
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=30))  # Increased timeout
     torch.cuda.set_device(local_rank)
 
     print(f"Starting process with LOCAL_RANK: {local_rank}, WORLD_SIZE: {world_size}")
 
     try:
-        # Set same random seed for all processes
+        # Set seed for reproducibility
         torch.manual_seed(42)
         np.random.seed(42)
-        
-        # GA setup - only on rank 0
-        if local_rank == 0:
-            creator.create("FitnessMin", base.Fitness, weights=(-1.0,))
-            creator.create("Individual", list, fitness=creator.FitnessMin)
 
-            toolbox = base.Toolbox()
-            toolbox.register("attr_lr", np.random.uniform, 1e-5, 1e-2)
-            toolbox.register("attr_batch_size", np.random.randint, 16, 128)
-            toolbox.register("individual", tools.initCycle, creator.Individual,
-                           (toolbox.attr_lr, toolbox.attr_batch_size), n=1)
-            toolbox.register("population", tools.initRepeat, list, toolbox.individual)
-            toolbox.register("evaluate", lambda ind: evaluate_hyperparameters(ind, local_rank))
-            toolbox.register("mate", tools.cxBlend, alpha=0.5)
-            toolbox.register("mutate", tools.mutGaussian, mu=0, sigma=1, indpb=0.2)
-            toolbox.register("select", tools.selTournament, tournsize=3)
-
-            population = toolbox.population(n=10)
-            ngen = 5
-            cxpb = 0.5
-            mutpb = 0.2
-
-            print("Running Genetic Algorithm for hyperparameter optimization...")
-            population, logbook = algorithms.eaSimple(population, toolbox, cxpb, mutpb, ngen, 
-                                                    verbose=True)
-
-            # Retrieve the best hyperparameters
-            best_individual = tools.selBest(population, k=1)[0]
-            best_lr, best_batch_size = best_individual
-            
-            # Broadcast best hyperparameters to all processes
-            best_params = torch.tensor([best_lr, float(best_batch_size)], device=f'cuda:{local_rank}')
-        else:
-            best_params = torch.zeros(2, device=f'cuda:{local_rank}')
-
-        # Broadcast best parameters from rank 0 to all processes
-        dist.broadcast(best_params, 0)
-        best_lr, best_batch_size = best_params.tolist()
-
-        if local_rank == 0:
-            print(f"Best hyperparameters: Learning Rate={best_lr}, Batch Size={best_batch_size}")
-
-        # Update training options with the best hyperparameters
+        # Initialize training options
         opt = TrainOptions().parse()
         val_opt = get_val_opt()
-        opt.lr = best_lr
-        opt.batch_size = int(best_batch_size)
-        val_opt.batch_size = int(best_batch_size // world_size)
 
-        # Initialize model and synchronize parameters
+        # Update the training options for batch size and learning rate
+        opt.lr = 0.001  # Example learning rate
+        opt.batch_size = 32  # Example batch size
+        val_opt.batch_size = int(opt.batch_size // world_size)
+
+        # Initialize the model and synchronize parameters
         model = DistributedTrainer(opt, local_rank)
         model.model = synchronize_model(model.model, local_rank)
-        
-        # Wait for all processes to finish model initialization
         dist.barrier()
-        
-        # Initialize data loaders
-        data_loader, train_sampler = create_distributed_dataloader(opt)
-        val_loader, _ = create_distributed_dataloader(val_opt)
 
-        if local_rank == 0:
-            print(f"Length of data loader: {len(data_loader)}")
-            print(f"Length of val loader: {len(val_loader)}")
+        opt.local_rank = local_rank
+        val_opt.local_rank = local_rank
+        opt.world_size = world_size
+        val_opt.world_size = world_size
 
-        best_val_metrics = {
-            'ap': 0.0,
-            'acc': 0.0,
-            'epoch': -1
-        }
+        # Create data loaders
+        data_loader, train_sampler = create_distributed_dataloader(opt, num_workers=8, pin_memory=True, rank=opt.local_rank)
+        val_loader, _ = create_distributed_dataloader(val_opt, num_workers=8, pin_memory=True, rank=opt.local_rank)
+
+        best_val_metrics = {'ap': 0.0, 'acc': 0.0, 'epoch': -1}
+
+        # Gradient Accumulation Setup
+        accumulation_steps = 4  # Number of batches to accumulate gradients before updating weights
 
         for epoch in range(opt.epoch):
             model.train()
             train_sampler.set_epoch(epoch)
 
             if local_rank == 0:
-                print(f"Epoch: {epoch + model.step_bias}")
+                print(f"Epoch {epoch + model.step_bias}")
 
             total_loss = 0
             num_batches = 0
 
-            for i, (img, crops, label) in enumerate(tqdm(
-                data_loader, 
-                desc=f"Training Epoch {epoch+1}",
-                disable=local_rank != 0
-            )):
+            for i, (img, crops, label) in enumerate(tqdm(data_loader, desc=f"Training Epoch {epoch+1}", disable=local_rank != 0)):
                 model.total_steps += 1
                 model.set_input((img, crops, label))
                 model.forward()
@@ -430,9 +336,9 @@ def main():
                     total_loss += opt_info['loss']
                     num_batches += 1
 
-                    if local_rank == 0 and i % 100 == 0:
-                        print(f"Step {i}: Loss={opt_info['loss']:.4f}, "
-                              f"Avg Grad Norm={opt_info['avg_grad_norm']:.4f}")
+                    # Perform gradient accumulation
+                    if (i + 1) % accumulation_steps == 0:
+                        model.optimizer_step()
 
             dist.barrier()
 
@@ -440,20 +346,15 @@ def main():
                 model.eval()
                 with torch.no_grad():
                     ap, fpr, fnr, acc = validate(model.model.module, val_loader, [local_rank])
-                    print(
-                        f"(Val @ epoch {epoch + model.step_bias}) "
-                        f"acc: {acc:.4f} ap: {ap:.4f} fpr: {fpr:.4f} fnr: {fnr:.4f}"
-                    )
-
+                    print(f"(Val @ epoch {epoch + model.step_bias}) acc: {acc:.4f} ap: {ap:.4f} fpr: {fpr:.4f} fnr: {fnr:.4f}")
+                    
+                    # Save the best model
                     if acc > best_val_metrics['acc']:
-                        best_val_metrics = {
-                            'ap': ap,
-                            'acc': acc,
-                            'epoch': epoch
-                        }
+                        best_val_metrics = {'ap': ap, 'acc': acc, 'epoch': epoch}
                         model.save_networks("best_model.pth")
                         print(f"New best model saved! Accuracy: {acc:.4f}")
 
+                    # Save model checkpoints at regular intervals
                     if epoch % opt.save_epoch_freq == 0:
                         model.save_networks(f"model_epoch_{epoch + model.step_bias}.pth")
 
