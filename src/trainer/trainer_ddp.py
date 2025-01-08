@@ -261,7 +261,10 @@ class DistributedTrainer(nn.Module):
         # Final barrier to ensure all processes are ready
         dist.barrier()
 
-    # Rest of the methods remain unchanged
+        # Initialize gradient accumulation parameters
+        self.accumulation_steps = opt.accumulation_steps if hasattr(opt, 'accumulation_steps') else 1
+        self.accumulated_steps = 0
+
     def set_input(self, input):
         """Move input data to device"""
         self.input = input[0].to(self.device)
@@ -284,7 +287,7 @@ class DistributedTrainer(nn.Module):
         self.features = self.model.module.get_features(self.input).to(self.device)
 
     def optimize_parameters(self):
-        """Optimize with gradient synchronization handled by DDP"""
+        """Optimize with gradient synchronization handled by DDP and gradient accumulation"""
         if self.loss is None:
             if dist.get_rank() == 0:
                 print("Warning: Loss is None!")
@@ -297,7 +300,13 @@ class DistributedTrainer(nn.Module):
         self.optimizer.zero_grad()
         loss_value = self.loss.item()
         self.loss.backward()
-        
+
+        # Accumulate gradients
+        self.accumulated_steps += 1
+        if self.accumulated_steps % self.accumulation_steps == 0:
+            self.optimizer.step()
+            self.accumulated_steps = 0  # Reset the step counter after an update
+
         total_grad_norm = 0
         num_params_with_grad = 0
         for name, param in self.model.named_parameters():
@@ -319,8 +328,6 @@ class DistributedTrainer(nn.Module):
         
         if hasattr(self.opt, 'grad_clip') and self.opt.grad_clip > 0:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.opt.grad_clip)
-        
-        self.optimizer.step()
         
         return {
             'loss': loss_value,
