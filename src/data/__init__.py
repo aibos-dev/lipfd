@@ -27,7 +27,7 @@ def create_dataloader(opt):
 
     data_loader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=opt.batch_size,
+        batch_size=4,
         shuffle=True,
         sampler=sampler,
         num_workers=int(opt.num_threads),
@@ -48,7 +48,7 @@ def create_distributed_dataloader(opt, num_workers, pin_memory, rank, dataset=No
 
     data_loader = torch.utils.data.DataLoader(
         dataset,
-        batch_size=opt.batch_size // opt.world_size,
+        batch_size=4 // opt.world_size,
         sampler=sampler,
         num_workers=8,
         pin_memory=True,

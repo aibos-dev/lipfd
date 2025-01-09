@@ -255,15 +255,9 @@ from tqdm import tqdm
 import warnings
 import numpy as np
 import datetime
-
+ 
 warnings.filterwarnings("ignore", category=UserWarning)
-
-def synchronize_model(model, local_rank):
-    """Ensure model parameters are synchronized across all ranks"""
-    for param in model.parameters():
-        dist.broadcast(param.data, src=0)
-    return model
-
+ 
 def get_val_opt():
     """Get validation options"""
     val_opt = TrainOptions().parse(print_options=False)
@@ -272,98 +266,125 @@ def get_val_opt():
     val_opt.real_list_path = "/workspace/datasets/AVlips_dataset/preprocessed_20241130/val/0_real"
     val_opt.fake_list_path = "/workspace/datasets/AVlips_dataset/preprocessed_20241130/val/1_fake"
     return val_opt
-
+ 
 def main():
     # Initialize distributed environment
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 4))
-    
-    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(minutes=30))  # Increased timeout
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    dist.init_process_group(
+        backend="nccl",
+        timeout=datetime.timedelta(minutes=30)
+    )
     torch.cuda.set_device(local_rank)
-
+ 
     print(f"Starting process with LOCAL_RANK: {local_rank}, WORLD_SIZE: {world_size}")
-
+ 
     try:
         # Set seed for reproducibility
         torch.manual_seed(42)
         np.random.seed(42)
-
+ 
         # Initialize training options
         opt = TrainOptions().parse()
         val_opt = get_val_opt()
-
-        # Update the training options for batch size and learning rate
-        opt.lr = 0.001  # Example learning rate
-        opt.batch_size = 32  # Example batch size
-        val_opt.batch_size = int(opt.batch_size // world_size)
-
-        # Initialize the model and synchronize parameters
-        model = DistributedTrainer(opt, local_rank)
-        model.model = synchronize_model(model.model, local_rank)
+        
+ 
+        # Update distributed training settings
+        for curr_opt in [opt, val_opt]:
+            curr_opt.local_rank = local_rank
+            curr_opt.world_size = world_size
+            curr_opt.batch_size = curr_opt.batch_size // world_size
+ 
+        # Initialize the model
+        trainer = DistributedTrainer(opt, local_rank)
+        model = trainer.model
         dist.barrier()
-
-        opt.local_rank = local_rank
-        val_opt.local_rank = local_rank
-        opt.world_size = world_size
-        val_opt.world_size = world_size
-
+        
         # Create data loaders
-        data_loader, train_sampler = create_distributed_dataloader(opt, num_workers=8, pin_memory=True, rank=opt.local_rank)
-        val_loader, _ = create_distributed_dataloader(val_opt, num_workers=8, pin_memory=True, rank=opt.local_rank)
-
+        data_loader, train_sampler = create_distributed_dataloader(
+            opt, 
+            num_workers=8, 
+            pin_memory=True, 
+            rank=opt.local_rank
+        )
+        val_loader, _ = create_distributed_dataloader(
+            val_opt, 
+            num_workers=8, 
+            pin_memory=True, 
+            rank=opt.local_rank
+        )
+ 
         best_val_metrics = {'ap': 0.0, 'acc': 0.0, 'epoch': -1}
-
-        # Gradient Accumulation Setup
-        accumulation_steps = 4  # Number of batches to accumulate gradients before updating weights
-
+ 
         for epoch in range(opt.epoch):
-            model.train()
+            trainer.model.train()
             train_sampler.set_epoch(epoch)
-
+ 
             if local_rank == 0:
-                print(f"Epoch {epoch + model.step_bias}")
-
+                print(f"Epoch {epoch + trainer.step_bias}")
+ 
             total_loss = 0
             num_batches = 0
-
-            for i, (img, crops, label) in enumerate(tqdm(data_loader, desc=f"Training Epoch {epoch+1}", disable=local_rank != 0)):
-                model.total_steps += 1
-                model.set_input((img, crops, label))
-                model.forward()
-                opt_info = model.optimize_parameters()
-
+ 
+            progress_bar = tqdm(
+                data_loader, 
+                desc=f"Training Epoch {epoch+1}", 
+                disable=local_rank != 0
+            )
+            for i, (img, crops, label) in enumerate(progress_bar):
+                trainer.total_steps += 1
+                trainer.set_input((img, crops, label))
+                trainer.forward()
+                opt_info = trainer.optimize_parameters()
+ 
                 if opt_info is not None:
                     total_loss += opt_info['loss']
                     num_batches += 1
-
-                    # Perform gradient accumulation
-                    if (i + 1) % accumulation_steps == 0:
-                        model.optimizer_step()
-
+                    if local_rank == 0:
+                        progress_bar.set_postfix({
+                            'loss': opt_info['loss'],
+                            'grad_norm': opt_info['avg_grad_norm']
+                        })
+ 
             dist.barrier()
-
+ 
+            # Validation on rank 0
             if local_rank == 0:
-                model.eval()
+                trainer.model.eval()
                 with torch.no_grad():
-                    ap, fpr, fnr, acc = validate(model.model.module, val_loader, [local_rank])
-                    print(f"(Val @ epoch {epoch + model.step_bias}) acc: {acc:.4f} ap: {ap:.4f} fpr: {fpr:.4f} fnr: {fnr:.4f}")
-                    
+                    ap, fpr, fnr, acc = validate(
+                        trainer.model.model.module, 
+                        val_loader, 
+                        [local_rank]
+                    )
+                    print(
+                        f"(Val @ epoch {epoch + trainer.model.step_bias}) "
+                        f"acc: {acc:.4f} ap: {ap:.4f} "
+                        f"fpr: {fpr:.4f} fnr: {fnr:.4f}"
+                    )
                     # Save the best model
                     if acc > best_val_metrics['acc']:
-                        best_val_metrics = {'ap': ap, 'acc': acc, 'epoch': epoch}
+                        best_val_metrics = {
+                            'ap': ap, 
+                            'acc': acc, 
+                            'epoch': epoch
+                        }
                         model.save_networks("best_model.pth")
                         print(f"New best model saved! Accuracy: {acc:.4f}")
-
+ 
                     # Save model checkpoints at regular intervals
                     if epoch % opt.save_epoch_freq == 0:
-                        model.save_networks(f"model_epoch_{epoch + model.step_bias}.pth")
-
+                        trainer.model.save_networks(
+                            f"model_epoch_{epoch + model.step_bias}.pth"
+                        )
+ 
         if local_rank == 0:
             print("\nTraining completed!")
             print(f"Best model performance (epoch {best_val_metrics['epoch']}):")
             print(f"Accuracy: {best_val_metrics['acc']:.4f}")
             print(f"AP: {best_val_metrics['ap']:.4f}")
-
+ 
     except KeyboardInterrupt:
         print("\nTraining interrupted by user")
     except Exception as e:
@@ -372,6 +393,6 @@ def main():
     finally:
         dist.destroy_process_group()
         torch.cuda.empty_cache()
-
+ 
 if __name__ == "__main__":
     main()

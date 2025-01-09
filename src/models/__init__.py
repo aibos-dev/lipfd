@@ -16,7 +16,13 @@ def get_model(name):
         assert False
 
 
-def build_model(transformer_name):
+def build_model(opt):
+    """Build model from options
+    
+    Args:
+        opt: Options object that contains transformer_name
+    """
+    transformer_name = opt.transformer_name
     assert transformer_name in VALID_NAMES
     if transformer_name.startswith("CLIP:"):
         return LipFD(transformer_name[5:])

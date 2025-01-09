@@ -16,8 +16,8 @@ class BaseOptions:
         parser.add_argument("--fake_list_path", default="/workspace/datasets/AVlips_dataset/preprocessed_20241130/train/1_fake")
         parser.add_argument("--data_label", default="train", help="label to decide whether train or validation dataset",)
 
-        parser.add_argument( "--batch_size", type=int, default=12, help="input batch size")
-        parser.add_argument("--gpu_ids", type=str, default="3", help="gpu ids: e.g. 0  0,1,2, 0,2. use -1 for CPU",)
+        parser.add_argument( "--batch_size", type=int, default=4, help="input batch size")
+        parser.add_argument("--gpu_ids", type=str, default="3", help="gpu ids: e.g. 0  0,1,2,3 0,2. use -1 for CPU",)
         parser.add_argument("--name", type=str, default="experiment_name", help="name of the experiment. It decides where to store samples and models",)
         parser.add_argument("--num_threads", default=0, type=int, help="# threads for loading data")
         parser.add_argument("--checkpoints_dir", type=str, default="./checkpoints", help="models are saved here",)

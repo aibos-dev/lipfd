@@ -17,6 +17,13 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--fine-tune', type=bool, default=False)
         parser.add_argument('--weight_decay', type=float, default=1e-4, help='weight decay for optimizer')
         parser.add_argument('--class_bal', type=bool, default=False, help='use class-balanced sampling')
+        parser.add_argument(
+        '--transformer_name',
+        type=str,
+        default='CLIP:ViT-B/32',
+        choices=["CLIP:ViT-B/32", "CLIP:ViT-B/16", "CLIP:ViT-L/14"],
+        help='Name of the transformer model to use'
+    )
         self.isTrain = True
 
         return parser

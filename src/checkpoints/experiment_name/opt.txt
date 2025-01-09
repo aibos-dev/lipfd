@@ -1,16 +1,16 @@
 ----------------- Options ---------------
                      arch: CLIP:ViT-L/14                 
-               batch_size: 12                            
+               batch_size: 4                             
                     beta1: 0.9                           
           checkpoints_dir: ./checkpoints                 
                 class_bal: False                         
                data_label: train                         
                     epoch: 16                            
-           fake_list_path: ./datasets/AVLips_new/1_fake  
+           fake_list_path: /workspace/datasets/AVlips_dataset/preprocessed_20241130/train/1_fake
                 fine_tune: False                         
              fix_backbone: False                         
               fix_encoder: True                          
-                  gpu_ids: 0                             
+                  gpu_ids: 3                             
                   isTrain: True                          	[default: None]
                 loss_freq: 100                           
                        lr: 1e-05                         
@@ -18,10 +18,11 @@
               num_threads: 0                             
                     optim: adam                          
          pretrained_model: ./checkpoints/experiment_name/model_epoch_8.pth
-           real_list_path: ./datasets/AVLips_new/0_real  
+           real_list_path: /workspace/datasets/AVlips_dataset/preprocessed_20241130/train/0_real
           save_epoch_freq: 1                             
            serial_batches: False                         
               train_split: train                         
+         transformer_name: CLIP:ViT-B/32                 
                 val_split: val                           
              weight_decay: 0.0001                        
 ----------------- End -------------------
